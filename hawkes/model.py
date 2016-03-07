@@ -14,17 +14,17 @@ class HawkesProcess(object):
         '''
         self.n_marks = mu_bg.size
         n = self.n_marks
-        n_params = n + n * n + n
+        n_params = n + 2 * n * n
         # global parameters
         self._theta = np.zeros(n_params)
         self._theta_mu_bg = self._theta[:n]
-        self._theta_b = self._theta[n:-n].reshape((n, n))
-        self._theta_mu = self._theta[-n:]
+        self._theta_b = self._theta[n:n + n*n].reshape((n, n))
+        self._theta_mu = self._theta[-n * n:].reshape((n, n))
         # gradients
         self._grad = np.zeros(n_params)
         self._grad_mu_bg = self._grad[:n]
-        self._grad_b = self._grad[n:-n].reshape((n, n))
-        self._grad_mu = self._grad[-n:]
+        self._grad_b = self._grad[n:n + n * n].reshape((n, n))
+        self._grad_mu = self._grad[-n * n:].reshape((n, n))
         # priors
         self._alpha_b = b_count * b_mean + 1
         self._beta_b = b_count
@@ -64,8 +64,8 @@ class HawkesProcess(object):
     def _e_step(self, dt, event_mark, mu_bg, b, mu):
         '''Estimate of latent event ancestors.'''
         z_bg = np.array(event_mark * mu_bg).ravel()  # background rates
-        _b = event_mark * b * event_mark.T  # map b to each pair of events
-        _mu = (event_mark * mu)[:, np.newaxis]  # map mu to each ancestor
+        _b = np.array(event_mark * b * event_mark.T)  # map b to each pair of events
+        _mu = np.array(event_mark * mu * event_mark.T)  # map mu to each ancestor
         z = np.where(dt >= 0, _mu * _b * np.exp(-_mu * dt), 0)  # exp decay likelihood
         # remainder is normalization of z, z_bg
         for i in range(z.shape[0]):
@@ -94,15 +94,12 @@ class HawkesProcess(object):
         # background \partial_\theta L = z\cdot S - T\lambda
         self._grad_mu_bg[:] = (np.array(z_bg * event_mark).ravel() - T * mu_bg) / T
         # summary statistics for likelihood
-        nu = np.array(event_mark.T * z * event_mark)
-        kappa = np.array(event_mark.T * (z * dt) * event_mark)
         M = np.array(event_mark.sum(axis=0)).ravel()[:, np.newaxis]
         norm = M + 1e-8
+        nu = np.array(event_mark.T * z * event_mark) / norm
+        kappa = np.array(event_mark.T * (z * dt) * event_mark) / norm
         # \partial_{\theta_b}L = -\left[M + \beta_b \right] b + \nu + \alpha_b - 1
-        self._grad_b[:] = -(M / norm + self._beta_b) * b + nu /norm + self._alpha_b - 1
+        self._grad_b[:] = -(M / norm + self._beta_b) * b + nu + self._alpha_b - 1
         # \partial_{\theta_\mu}L = -\left[\kappa + \beta_\mu\right]\mu + \nu + \alpha_\mu - 1
-        norm = norm.sum(axis=1)
-        nu = nu.sum(axis=1) / norm
-        kappa = kappa.sum(axis=1) / norm
         self._grad_mu[:] = -(kappa + self._beta_mu) * mu + nu + self._alpha_mu - 1.
         return self._grad
