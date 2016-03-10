@@ -1,72 +1,70 @@
 
 from scipy import sparse
 import numpy as np
-
+from .trainer import Adam
+from .simulation import simulateHawkes
 
 class HawkesProcess(object):
-    def __init__(self, mu_bg, b_count, b_mean, mu_count, mu_mean):
+    def __init__(self, kernel, mu0, b0, mu_pseudo_counts=None, b_pseudo_counts=None, alpha=1e-2):
         '''
-        Class for online estimation of marked Hawkes process.
+        Stochastic EM estimation of marked Hawkes process.
 
-        Only constant background rates and exponential kernels
-        are supported. Online-EM is used with stochastic gradients
-        to optimize likelihood.
+        Args:
+          kernel: HawkesKernel for time dependencies
+          mu0: array of background rates for initialization
+          b0: matrix of branching ratios for initialization and prior
+          b_pseudo_counts: pseudo counts for prior on b
         '''
-        self.n_marks = mu_bg.size
-        n = self.n_marks
-        n_params = n + 2 * n * n
+        self.kernel = kernel
+        self.n_marks = mu0.size
+        self.n_params = self.n_marks * (1 + self.n_marks)
         # global parameters
-        self._theta = np.zeros(n_params)
-        self._theta_mu_bg = self._theta[:n]
-        self._theta_b = self._theta[n:n + n*n].reshape((n, n))
-        self._theta_mu = self._theta[-n * n:].reshape((n, n))
-        # gradients
-        self._grad = np.zeros(n_params)
-        self._grad_mu_bg = self._grad[:n]
-        self._grad_b = self._grad[n:n + n * n].reshape((n, n))
-        self._grad_mu = self._grad[-n * n:].reshape((n, n))
+        self._theta_mu = np.log(mu0)
+        self._theta_b = np.log(b0)
         # priors
-        self._alpha_b = b_count * b_mean + 1
-        self._beta_b = b_count
-        self._alpha_mu = mu_count + 1
-        self._beta_mu = mu_count * mu_mean
-        # init with priors
-        self._theta_mu_bg[:] = np.log(mu_bg)
-        self._theta_b[:] = np.log(b_mean)
-        self._theta_mu[:] = np.log(mu_mean)
-
-    @property
-    def mu_bg(self):
-        return np.exp(self._theta_mu_bg)
-
-    @property
-    def b(self):
-        return np.exp(self._theta_b)
+        self.alpha_b = np.ones_like(b0)
+        self.beta_b = np.zeros_like(b0)
+        if b_pseudo_counts is not None:
+            self.alpha_b += b_pseudo_counts * b0
+            self.beta_b = b_pseudo_counts
+        # gradient
+        self._trainer = Adam(alpha=alpha)
+        #TODO prior on background rates
 
     @property
     def mu(self):
         return np.exp(self._theta_mu)
 
-    def update(self, delta_theta):
-        self._theta += delta_theta
+    @property
+    def b(self):
+        return np.exp(self._theta_b)
+
+    def partial_fit(self, t, marks, T=None):
+        g = self.grad(t, marks, T)
+        self._update(self._trainer.update(g))
+
+    def _update(self, delta):
+        n = self.n_marks
+        self._theta_mu += delta[:n]
+        self._theta_b += delta[n:self.n_params].reshape((n, n))
+        self.kernel.update(delta[self.n_params:])
 
     def _preprocess(self, t, marks):
         '''Compute auxiliary quantities for EM-steps.'''
-        n_events = t.size
         # event_mark allows to transform from mark-space to event-space
         # and vice versa
-        event_mark = sparse.csr_matrix((np.ones(n_events),
-                                        (np.arange(n_events, dtype=np.int), marks)),
-                                       shape=(n_events, self.n_marks))
+        n = t.size
+        data = (np.ones(n), (np.arange(n, dtype=np.int), marks))
+        event_mark = sparse.csr_matrix(data, shape=(n, self.n_marks))
         dt = t[np.newaxis, :] - t[:, np.newaxis]
         return dt, event_mark
 
-    def _e_step(self, dt, event_mark, mu_bg, b, mu):
+    def _e_step(self, dt, event_mark, mu, b):
         '''Estimate of latent event ancestors.'''
-        z_bg = np.array(event_mark * mu_bg).ravel()  # background rates
-        _b = np.array(event_mark * b * event_mark.T)  # map b to each pair of events
-        _mu = np.array(event_mark * mu * event_mark.T)  # map mu to each ancestor
-        z = np.where(dt >= 0, _mu * _b * np.exp(-_mu * dt), 0)  # exp decay likelihood
+        z_bg = np.array(event_mark * mu).ravel()  # background rates
+        # map b to each pair of events
+        _b = np.array(event_mark * b * event_mark.T)
+        z = _b * self.kernel.likelihood(event_mark, dt)  # exp decay likelihood
         # remainder is normalization of z, z_bg
         for i in range(z.shape[0]):
             z[i, i] = 0
@@ -75,31 +73,31 @@ class HawkesProcess(object):
         z_bg /= norm
         return z_bg, z
 
-    def gradient(self, t, marks, T=None):
+    def grad(self, t, marks, T=None):
         '''Compute gradient of likelihood for single observation.'''
         T = T or t.max()
         # init data structures
         dt, event_mark = self._preprocess(t, marks)
-        mu_bg, b, mu = self.mu_bg, self.b, self.mu
-        z_bg, z = self._e_step(dt, event_mark, mu_bg, b, mu)
-        return self._m_step(z, z_bg, dt, event_mark, mu_bg, b, mu, T)
+        mu, b = self.mu, self.b
+        z_bg, z = self._e_step(dt, event_mark, mu, b)
+        return self._m_step(z, z_bg, dt, event_mark, mu, b, T)
 
     def transform(self, t, marks):
         '''Transform event sequence to latent ancestor variables.'''
         dt, event_mark = self._preprocess(t, marks)
-        z_bg, z = self._e_step(dt, event_mark, self.mu_bg, self.b, self.mu)
+        z_bg, z = self._e_step(dt, event_mark, self.mu, self.b)
         return z_bg, z
 
-    def _m_step(self, z, z_bg, dt, event_mark, mu_bg, b, mu, T):
-        # background \partial_\theta L = z\cdot S - T\lambda
-        self._grad_mu_bg[:] = (np.array(z_bg * event_mark).ravel() - T * mu_bg) / T
-        # summary statistics for likelihood
-        M = np.array(event_mark.sum(axis=0)).ravel()[:, np.newaxis]
-        norm = M + 1e-8
-        nu = np.array(event_mark.T * z * event_mark) / norm
-        kappa = np.array(event_mark.T * (z * dt) * event_mark) / norm
-        # \partial_{\theta_b}L = -\left[M + \beta_b \right] b + \nu + \alpha_b - 1
-        self._grad_b[:] = -(M / norm + self._beta_b) * b + nu + self._alpha_b - 1
-        # \partial_{\theta_\mu}L = -\left[\kappa + \beta_\mu\right]\mu + \nu + \alpha_\mu - 1
-        self._grad_mu[:] = -(kappa + self._beta_mu) * mu + nu + self._alpha_mu - 1.
-        return self._grad
+    def _m_step(self, z, z_bg, dt, event_mark, mu, b, T):
+        # background
+        grad_mu = (np.array(z_bg * event_mark).ravel() - T * mu) / T
+        # number of observed parent/ child events
+        n_observation = np.array(event_mark.sum(axis=0)).ravel()[:, np.newaxis]
+        nu = np.array(event_mark.T * z * event_mark) / (n_observation + 1e-8)
+        # self-excitation
+        grad_b = np.where(n_observation > 0, -(1. + self.beta_b) * b + nu + self.alpha_b - 1., 0)
+        grad_kernel = self.kernel.grad(event_mark, z, dt, n_observation, nu)
+        return np.r_[grad_mu, grad_b.ravel(), grad_kernel]
+
+    def simulate(self, T, discrete=False):
+        return simulateHawkes(self, T, discrete)
