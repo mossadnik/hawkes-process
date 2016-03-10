@@ -58,7 +58,7 @@ class PoissonKernel(object):
 
     def likelihood(self, event_mark, dt):
         mu = np.array(event_mark * self.mu * event_mark.T)
-        return stats.poisson(mu).pmf(dt)
+        return stats.poisson(mu).pmf(dt.astype(int))
 
     def grad(self, event_mark, z, dt, n_observation, nu):
         n = n_observation + 1e-8
@@ -106,7 +106,7 @@ class NegativeBinomialKernel(object):
     def likelihood(self, event_mark, dt):
         r = np.array(event_mark * self.r * event_mark.T)
         p = np.array(event_mark * self.p * event_mark.T)
-        return stats.nbinom(r, 1. - p).pmf(dt)
+        return stats.nbinom(r, 1. - p).pmf(dt.astype(int))
 
     def grad(self, event_mark, z, dt, n_observation, nu):
         _dt = np.maximum(dt, 0.)
