@@ -40,7 +40,18 @@ class HawkesProcess(object):
         return np.exp(self._theta_b)
 
     def partial_fit(self, t, marks, T=None):
-        g = self.grad(t, marks, T)
+        '''
+        Update model parameters using a single sequence as mini-batch.
+
+        Args:
+          t: array of event times
+          marks: integer array of event types
+          T (float or int > 0): observation period. Inferred as T = t.max() if not specified.
+        '''
+        T = T or t.max()
+        if T == 0:
+            raise ValueError("Invalid observation period T=0.\nNote that inference of T works only for sequences of finite temporal extent (t.max() > 0).")
+        g = self._grad(t, marks, T)
         self._update(self._trainer.update(g))
 
     def _update(self, delta):
@@ -73,9 +84,8 @@ class HawkesProcess(object):
         z_bg /= norm
         return z_bg, z
 
-    def grad(self, t, marks, T=None):
+    def _grad(self, t, marks, T=None):
         '''Compute gradient of likelihood for single observation.'''
-        T = T or t.max()
         # init data structures
         dt, event_mark = self._preprocess(t, marks)
         mu, b = self.mu, self.b
