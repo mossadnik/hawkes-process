@@ -3,6 +3,7 @@ from scipy import sparse
 import numpy as np
 from .trainer import Adam
 from .simulation import simulateHawkes
+from .cluster import cluster_events
 
 
 class HawkesProcess(object):
@@ -39,10 +40,9 @@ class HawkesProcess(object):
             self.alpha_b += b_pseudo_counts * b0
             self.beta_b = b_pseudo_counts
         z_shape = (self.n_marks + 1, self.n_marks)
-        if not alpha_pi:
-            self.alpha_pi = np.ones(z_shape)
-        else:
-        	self.alpha_pi = alpha_pi
+        if alpha_pi is None:
+            alpha_pi = np.ones(z_shape)
+        self.alpha_pi = alpha_pi.astype(float)
         norm = self.alpha_pi.sum(axis=0)[np.newaxis, :]
         self._theta_pi = np.log((self.alpha_pi / norm) / (1. - self.alpha_pi / norm))
         self._trainer = Adam(alpha=alpha)
@@ -124,22 +124,6 @@ class HawkesProcess(object):
         z = self._e_step(dt, event_mark, mu, b, pi_z)
         return self._m_step(z, dt, event_mark, mu, b, pi_z, T)
 
-    def transform(self, t, marks):
-        '''
-        Transform event sequence to latent ancestor variables.
-
-        Note that results are affected by the prior on z, but not on
-        other parameters.
-
-        returns:
-          z: (n_marks + 1) x n_marks matrix of ancestor probabilities for
-             each event. Each column is a categorical distribution over
-             possible ancestors. The last row corresponds to background.
-        '''
-        dt, event_mark = self._preprocess(t, marks)
-        z = self._e_step(dt, event_mark, self.mu, self.b, self.pi_z)
-        return z
-
     def _m_step(self, z, dt, event_mark, mu, b, pi_z, T):
         # background
         grad_mu = (np.array(z[-1, :] * event_mark).ravel() - T * mu) / T
@@ -158,6 +142,33 @@ class HawkesProcess(object):
         grad_pi -= mult * grad_constraint
         grad_pi *= (n_observation > 0).T
         return np.r_[grad_mu, grad_b.ravel(), grad_kernel, grad_pi.ravel()]
+
+    def transform(self, t, marks):
+        '''
+        Transform event sequence to latent ancestor variables.
+
+        Note that results are affected by the prior on z, but not on
+        other parameters.
+
+        returns:
+          z: (n_marks + 1) x n_marks matrix of ancestor probabilities for
+             each event. Each column is a categorical distribution over
+             possible ancestors. The last row corresponds to background.
+        '''
+        dt, event_mark = self._preprocess(t, marks)
+        z = self._e_step(dt, event_mark, self.mu, self.b, self.pi_z)
+        return z
+
+    def cluster_transform(self, t, marks):
+        '''
+        Transform event sequence into most likely latent tree structure.
+
+        returns:
+          parent, cluster: integer arrays containing most likely parent
+                           and inferred cluster assignments.
+                           parent = -1 means background event.
+        '''
+        return cluster_events(self.transform(t, marks))
 
     def simulate(self, T, discrete=False):
         '''
